@@ -320,3 +320,105 @@ class TestCommandLine:
             archive.writestr("a.txt", "x")
         assert self.run([str(path)]) == 2
         assert "no .dist-info/METADATA" in capsys.readouterr().err
+
+
+class TestRigour:
+    """Edge cases that the first pass missed: malformed metadata and marker grammar."""
+
+    def test_a_leading_blank_line_is_skipped(self, tmp_path):
+        path = tmp_path / "x-1.0-py3-none-any.whl"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(
+                "x-1.0.dist-info/METADATA",
+                "\nName: x\nVersion: 1.0\nRequires-Dist: sqlalchemy\n\nbody\n",
+            )
+        wheel = read_wheel(path)
+        assert wheel.name == "x"
+        assert [requirement.name for requirement in wheel.requirements] == ["sqlalchemy"]
+
+    def test_metadata_without_a_name_is_rejected(self, tmp_path):
+        path = tmp_path / "x-1.0-py3-none-any.whl"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("x-1.0.dist-info/METADATA", "Version: 1.0\n\nbody\n")
+        with pytest.raises(ValueError, match="has no Name"):
+            read_wheel(path)
+
+    def test_a_trailing_plus_and_empty_chunks_in_a_version(self):
+        assert evaluate_marker('python_version > "3.9+"', ENV)
+        assert evaluate_marker('python_version > "3.12.1"', ENV) is False
+
+    def test_a_non_numeric_version_chunk(self):
+        # "rc" sorts after the bare release, so 3.12.0rc1 > 3.12.0
+        assert evaluate_marker('python_version > "3.12.0"', {**ENV, "python_version": "3.12.0rc1"})
+
+    def test_compatible_release_operator(self):
+        assert evaluate_marker('python_version ~= "3.12"', ENV)
+        assert evaluate_marker('python_version ~= "3.11"', ENV) is False
+
+    def test_less_or_equal(self):
+        assert evaluate_marker('python_version <= "3.12"', ENV)
+        assert evaluate_marker('python_version <= "3.11"', ENV) is False
+
+    def test_an_unknown_operator(self):
+        from wheeldeps import _compare
+
+        with pytest.raises(ValueError, match="unknown operator"):
+            _compare("1", "~~", "1")
+
+    @pytest.mark.parametrize(
+        ("marker", "message"),
+        [
+            ("python_version ! 3.9", "cannot parse marker"),
+            ('python_version == "3.9" and ', "marker ended early"),
+            ('python_version == "3.9" extra', "unexpected"),
+            ('"3.9" == "3.9"', "expected a marker variable"),
+            ('python_version "3.9"', "expected an operator"),
+            ("python_version == sys_platform", "expected a quoted value"),
+        ],
+    )
+    def test_malformed_markers_raise(self, marker, message):
+        with pytest.raises(ValueError, match=message):
+            evaluate_marker(marker, ENV)
+
+    def test_a_parenthesis_that_closes_wrongly(self):
+        with pytest.raises(ValueError, match="expected '\)'"):
+            evaluate_marker('(python_version == "3.9" "3.9")', ENV)
+
+    def test_an_unknown_variable_is_false(self):
+        assert evaluate_marker('java_version == "17"', ENV) is False
+
+    def test_the_module_entry_point_prints_usage(self):
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-m", "wheeldeps", "--help"], capture_output=True, text=True
+        )
+        assert result.returncode == 0
+        assert "wheel" in result.stdout.lower()
+
+
+class TestJsonOutput:
+    def test_json_names(self, tmp_path, capsys):
+        from wheeldeps.__main__ import main
+
+        path = make_wheel(tmp_path, "app", requires=["requests"])
+        assert main([str(path), "--closure", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload == [payload[0]]
+        assert "app" in payload
+
+
+class TestRigour2:
+    """Version chunks that are pure numbers."""
+
+    def test_a_bare_major_version_has_one_chunk(self):
+        from wheeldeps import _version_key
+
+        assert _version_key("1") == ((0, 1, ""),)
+
+    def test_a_chunk_that_starts_with_a_letter(self):
+        from wheeldeps import _version_key
+
+        assert _version_key("rc1") == ((1, 0, "rc1"),)
+        assert _version_key("1.rc1") == ((0, 1, ""), (1, 0, "rc1"))
