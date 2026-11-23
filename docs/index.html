@@ -129,6 +129,7 @@ for requirement in external_requirements(wheels):
 <pre class="code"><span class="lang">console</span><code>python -m venv .venv
 .venv/bin/pip install -e &quot;.[test]&quot;
 .venv/bin/pytest</code></pre>
+<p>The suite covers every line of the package (<code>pytest --cov --cov-branch</code>), and the examples in the docstrings run as tests through <code>--doctest-modules</code>.</p>
 <h2>License</h2>
 <p>MIT.</p>
 </main>
